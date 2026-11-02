@@ -51,6 +51,21 @@ beforeEach(() => {
           home: "",
         };
       else if (url === "/api/logs") data = [];
+      else if (url === "/api/usage")
+        data = {
+          items: [
+            {
+              time: "2026-11-02T00:00:00Z",
+              session_id: "s1",
+              calls: 1,
+              input: 120,
+              output: 80,
+              total: 200,
+            },
+          ],
+          totals: { calls: 3, input: 130, output: 85, total: 215 },
+        };
+      else if (url === "/api/diag") data = { stderr: "fixture stderr line" };
       else if (url === "/api/install/start") data = { ok: true };
       else if (url === "/api/install/status") {
         installPolls++;
@@ -363,4 +378,17 @@ it("compresses and branches the active session", async () => {
       ),
     ).toBe(true),
   );
+});
+
+it("shows the usage dashboard and diagnostics on the logs page", async () => {
+  signedIn = true;
+  const user = userEvent.setup();
+  render(<App />);
+  await screen.findByText("既有對話");
+  await user.click(screen.getByRole("button", { name: /執行紀錄/ }));
+  expect(await screen.findByText("總 tokens")).toBeInTheDocument();
+  expect(screen.getByText("215")).toBeInTheDocument();
+  expect(
+    await screen.findByText("fixture stderr line"),
+  ).toBeInTheDocument();
 });

@@ -1531,3 +1531,12 @@ svg {
   padding: 4px;
   font-size: 12px;
 }
+
+/* Usage dashboard & diagnostics */
+.usage-card{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:0.75rem;margin:0.75rem 0}
+.usage-card>div{background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:0.75rem 1rem;display:flex;flex-direction:column;gap:0.25rem}
+.usage-card span{font-size:0.7rem;letter-spacing:0.08em;text-transform:uppercase;opacity:0.65}
+.usage-card strong{font-size:1.35rem;font-variant-numeric:tabular-nums}
+.diag-box{margin:0.75rem 0;border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:0.5rem 0.75rem}
+.diag-box summary{cursor:pointer;font-size:0.85rem;opacity:0.8}
+.diag-box pre{margin:0.5rem 0 0.25rem;background:rgba(0,0,0,0.35);border-radius:8px;padding:0.6rem;font-size:0.78rem;line-height:1.5;white-space:pre-wrap;word-break:break-all;max-height:16rem;overflow:auto}

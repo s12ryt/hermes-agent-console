@@ -55,6 +55,17 @@ type Session = {
   started_at?: number;
 };
 type Entry = { id: number; time: string; kind: string; detail: string };
+type UsageInfo = {
+  items: {
+    time: string;
+    session_id: string;
+    calls: number;
+    input: number;
+    output: number;
+    total: number;
+  }[];
+  totals: { calls: number; input: number; output: number; total: number };
+};
 type InstallStatus = {
   running: boolean;
   done: boolean;
@@ -136,6 +147,8 @@ export default function App() {
   const [logs, setLogs] = useState<Entry[]>([]),
     [events, setEvents] = useState<Entry[]>([]),
     [eventConnected, setEventConnected] = useState(false);
+  const [usage, setUsage] = useState<UsageInfo | null>(null),
+    [diag, setDiag] = useState("");
   const [model, setModel] = useState(""),
     [provider, setProvider] = useState(""),
     [modelOptions, setModelOptions] = useState<unknown>(null),
@@ -415,7 +428,13 @@ export default function App() {
     setMobile(false);
     setError("");
     setNotice("");
-    if (next === "logs") api<Entry[]>("/logs").then(setLogs).catch(report);
+    if (next === "logs") {
+      api<Entry[]>("/logs").then(setLogs).catch(report);
+      api<UsageInfo>("/usage").then(setUsage).catch(() => setUsage(null));
+      api<{ stderr: string }>("/diag")
+        .then((d) => setDiag(d.stderr ?? ""))
+        .catch(() => setDiag(""));
+    }
   };
   const login = (e: FormEvent) => {
     e.preventDefault();
@@ -1333,6 +1352,26 @@ export default function App() {
               <h1>每一步，都有跡可循。</h1>
               <p>控制台操作紀錄與目前瀏覽器收到的 Hermes 事件。</p>
             </div>
+            {usage && (usage.totals?.total || usage.items?.length) ? (
+              <div className="usage-card">
+                <div>
+                  <span>回合數</span>
+                  <strong>{usage.totals.calls}</strong>
+                </div>
+                <div>
+                  <span>輸入 tokens</span>
+                  <strong>{Math.round(usage.totals.input)}</strong>
+                </div>
+                <div>
+                  <span>輸出 tokens</span>
+                  <strong>{Math.round(usage.totals.output)}</strong>
+                </div>
+                <div>
+                  <span>總 tokens</span>
+                  <strong>{Math.round(usage.totals.total)}</strong>
+                </div>
+              </div>
+            ) : null}
             <div className="log-heading">
               <h2>
                 活動紀錄 <span>{logs.length + events.length}</span>
@@ -1379,9 +1418,14 @@ export default function App() {
                 </div>
               )}
             </div>
+            <details className="diag-box">
+              <summary>Hermes 診斷（stderr 尾端）</summary>
+              <pre>{diag || "目前沒有 Hermes 診斷輸出。"}</pre>
+            </details>
             <p className="muted log-foot">
               控制台保留最近 1,000 筆操作，本頁顯示最近 200
-              筆；串流事件僅保留於目前瀏覽器。
+              筆；串流事件僅保留於目前瀏覽器。用量資訊由 Hermes
+              回報後累計。
             </p>
           </div>
         )}
