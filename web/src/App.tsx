@@ -6,8 +6,16 @@ import {
   type FormEvent,
 } from "react";
 import Markdown from "react-markdown";
+import SecuritySettings from "./SecuritySettings";
+import WorkspaceFiles from "./WorkspaceFiles";
+import MaintenanceSettings from "./MaintenanceSettings";
+import ConversationSearch from "./ConversationSearch";
+import { notifyFrame } from "./notifications";
+import { downloadConversation } from "./conversationExport";
 import {
   ArrowDown,
+  Archive,
+  Trash2,
   ArrowUp,
   ArrowUpRight,
   Activity,
@@ -193,7 +201,11 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [installSt]);
   useEffect(() => {
-    if (installSt?.done && !installSt.error && (installSt.python || installSt.source)) {
+    if (
+      installSt?.done &&
+      !installSt.error &&
+      (installSt.python || installSt.source)
+    ) {
       setSettings((s) => ({
         ...s,
         python: installSt.python || s.python,
@@ -307,6 +319,7 @@ export default function App() {
     });
     source.addEventListener("frame", (event) => {
       const frame: Frame = JSON.parse((event as MessageEvent).data);
+      notifyFrame(frame);
       if (frame.method === "console.status") {
         const next = frame.params as Status;
         setStatus(next);
@@ -328,6 +341,13 @@ export default function App() {
         setChat((old) => applyFrame(old, frame));
       }
       const kind = String(frame.params?.type ?? frame.method);
+      if (
+        kind === "message.complete" &&
+        typeof frame.params?.session_id === "string"
+      )
+        rpc("session.history", { session_id: frame.params.session_id }).catch(
+          report,
+        );
       if (kind === "error" || kind === "session.error")
         setError(
           String(
@@ -430,7 +450,9 @@ export default function App() {
     setNotice("");
     if (next === "logs") {
       api<Entry[]>("/logs").then(setLogs).catch(report);
-      api<UsageInfo>("/usage").then(setUsage).catch(() => setUsage(null));
+      api<UsageInfo>("/usage")
+        .then(setUsage)
+        .catch(() => setUsage(null));
       api<{ stderr: string }>("/diag")
         .then((d) => setDiag(d.stderr ?? ""))
         .catch(() => setDiag(""));
@@ -567,6 +589,30 @@ export default function App() {
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
+        <ConversationSearch
+          request={api}
+          open={async (id) => {
+            await hydrate("session.resume", id);
+            setPage("chat");
+            setMobile(false);
+          }}
+        />
+        <button
+          onClick={() =>
+            run(async () => {
+              if (typeof Notification === "undefined")
+                throw new Error("此瀏覽器不支援桌面通知");
+              const permission = await Notification.requestPermission();
+              setNotice(
+                permission === "granted"
+                  ? "已啟用背景回覆與核准通知"
+                  : "瀏覽器未允許通知",
+              );
+            })
+          }
+        >
+          啟用桌面通知
+        </button>
         <div className="session-list">
           {sessions
             .filter((s) =>
@@ -592,6 +638,43 @@ export default function App() {
                   <span>{s.title || "未命名對話"}</span>
                 </button>
                 <span className="item-actions">
+                  <button
+                    aria-label={`歸檔 ${s.title ?? s.id}`}
+                    title="歸檔"
+                    disabled={busy || !status.connected}
+                    onClick={() =>
+                      run(async () => {
+                        await rpc("session.archive", {
+                          session_id: s.id,
+                          archived: true,
+                        });
+                        setNotice("對話已歸檔");
+                        await refreshSessions();
+                      })
+                    }
+                  >
+                    <Archive size={13} />
+                  </button>
+                  <button
+                    aria-label={`刪除 ${s.title ?? s.id}`}
+                    title="永久刪除（需先關閉執行中的對話）"
+                    disabled={busy || !status.connected}
+                    onClick={() => {
+                      if (
+                        !window.confirm(
+                          "永久刪除此對話與逐字稿？此操作無法復原。執行中的對話需先關閉。",
+                        )
+                      )
+                        return;
+                      run(async () => {
+                        await rpc("session.delete", { session_id: s.id });
+                        setNotice("對話已永久刪除");
+                        await refreshSessions();
+                      });
+                    }}
+                  >
+                    <Trash2 size={13} />
+                  </button>
                   <button
                     aria-label={`重新命名 ${s.title ?? s.id}`}
                     title="重新命名"
@@ -715,6 +798,22 @@ export default function App() {
               </span>
               <div className="toolbar-actions">
                 <button
+                  disabled={!chat.messages.length}
+                  onClick={() =>
+                    downloadConversation(chat.session, chat.messages, "md")
+                  }
+                >
+                  匯出 Markdown
+                </button>
+                <button
+                  disabled={!chat.messages.length}
+                  onClick={() =>
+                    downloadConversation(chat.session, chat.messages, "json")
+                  }
+                >
+                  匯出 JSON
+                </button>
+                <button
                   onClick={() => setModelOpen(!modelOpen)}
                   disabled={!status.connected}
                 >
@@ -722,56 +821,57 @@ export default function App() {
                   {model || "預設模型"}
                   <ChevronDown size={13} />
                 </button>
-            {chat.session && (
-              <>
-                <button
-                  aria-label="重新讀取目前對話"
-                  disabled={busy}
-                  onClick={() =>
-                    run(async () => {
-                      await hydrate("session.activate", chat.session);
-                    })
-                  }
-                >
-                  <RefreshCw size={14} />
-                </button>
-                <button
-                  aria-label="壓縮對話"
-                  title="壓縮對話（摘要化長對話）"
-                  disabled={busy}
-                  onClick={() =>
-                    run(async () => {
-                      await rpc("session.compress", {
-                        session_id: chat.session,
-                      });
-                      setNotice("已送出壓縮請求，完成後重新讀取");
-                      await refreshSessions();
-                      await hydrate("session.resume", chat.session);
-                    })
-                  }
-                >
-                  <Merge size={14} />
-                </button>
-                <button
-                  aria-label="建立分支"
-                  title="以此對話建立分支"
-                  disabled={busy}
-                  onClick={() =>
-                    run(async () => {
-                      const data = await rpc("session.branch_whole", {
-                        session_id: chat.session,
-                      });
-                      setNotice("已建立分支");
-                      await refreshSessions();
-                      const sid = data?.session_id;
-                      if (sid) await hydrate("session.activate", String(sid));
-                    })
-                  }
-                >
-                  <GitBranch size={14} />
-                </button>
-              </>
-            )}
+                {chat.session && (
+                  <>
+                    <button
+                      aria-label="重新讀取目前對話"
+                      disabled={busy}
+                      onClick={() =>
+                        run(async () => {
+                          await hydrate("session.activate", chat.session);
+                        })
+                      }
+                    >
+                      <RefreshCw size={14} />
+                    </button>
+                    <button
+                      aria-label="壓縮對話"
+                      title="壓縮對話（摘要化長對話）"
+                      disabled={busy}
+                      onClick={() =>
+                        run(async () => {
+                          await rpc("session.compress", {
+                            session_id: chat.session,
+                          });
+                          setNotice("已送出壓縮請求，完成後重新讀取");
+                          await refreshSessions();
+                          await hydrate("session.resume", chat.session);
+                        })
+                      }
+                    >
+                      <Merge size={14} />
+                    </button>
+                    <button
+                      aria-label="建立分支"
+                      title="以此對話建立分支"
+                      disabled={busy}
+                      onClick={() =>
+                        run(async () => {
+                          const data = await rpc("session.branch_whole", {
+                            session_id: chat.session,
+                          });
+                          setNotice("已建立分支");
+                          await refreshSessions();
+                          const sid = data?.session_id;
+                          if (sid)
+                            await hydrate("session.activate", String(sid));
+                        })
+                      }
+                    >
+                      <GitBranch size={14} />
+                    </button>
+                  </>
+                )}
               </div>
             </div>
             {modelOpen && (
@@ -931,6 +1031,40 @@ export default function App() {
                       <div className="markdown">
                         <Markdown>{message.text}</Markdown>
                       </div>
+                      {(message.role === "user" ||
+                        message.role === "assistant") &&
+                        message.text.trim() && (
+                          <button
+                            aria-label={`從第 ${i + 1} 則訊息分支`}
+                            disabled={busy || chat.running || !status.connected}
+                            onClick={() =>
+                              run(async () => {
+                                const count = chat.messages
+                                  .slice(0, i + 1)
+                                  .filter(
+                                    (m) =>
+                                      (m.role === "user" ||
+                                        m.role === "assistant") &&
+                                      m.text.trim(),
+                                  ).length;
+                                const data = await rpc("session.branch", {
+                                  session_id: chat.session,
+                                  count,
+                                });
+                                if (data.session_id)
+                                  await hydrate(
+                                    "session.activate",
+                                    String(data.session_id),
+                                  );
+                                await refreshSessions();
+                                setNotice("已建立訊息分支");
+                              })
+                            }
+                          >
+                            <GitBranch size={12} />
+                            從這裡分支
+                          </button>
+                        )}
                     </div>
                   </article>
                 ))}
@@ -1053,6 +1187,9 @@ export default function App() {
               <p>連接伺服器上的 Hermes，設定你的工作環境。</p>
             </div>
             <div className="settings-layout">
+              <SecuritySettings request={api} />
+              <WorkspaceFiles request={api} />
+              <MaintenanceSettings request={api} />
               <section className="panel">
                 <div className="panel-heading">
                   <div className="panel-symbol">
@@ -1235,11 +1372,17 @@ export default function App() {
                     }
                     placeholder="main"
                   />
-                  <small>預設 main；模型供應商登入與 API key 仍依 Hermes 官方流程設定。</small>
+                  <small>
+                    預設 main；模型供應商登入與 API key 仍依 Hermes
+                    官方流程設定。
+                  </small>
                 </label>
                 <div className="panel-footer">
                   <span>下載 → venv → pip → 驗證 tui_gateway</span>
-                  <button className="primary" disabled={busy || installSt?.running}>
+                  <button
+                    className="primary"
+                    disabled={busy || installSt?.running}
+                  >
                     <ArrowDown size={15} />
                     {installSt?.running ? "安裝中…" : "下載並安裝"}
                   </button>
@@ -1260,7 +1403,9 @@ export default function App() {
                     </div>
                   )}
                   {installSt.log.length > 0 && (
-                    <pre className="install-log">{installSt.log.join("\n")}</pre>
+                    <pre className="install-log">
+                      {installSt.log.join("\n")}
+                    </pre>
                   )}
                 </div>
               )}
@@ -1424,8 +1569,7 @@ export default function App() {
             </details>
             <p className="muted log-foot">
               控制台保留最近 1,000 筆操作，本頁顯示最近 200
-              筆；串流事件僅保留於目前瀏覽器。用量資訊由 Hermes
-              回報後累計。
+              筆；串流事件僅保留於目前瀏覽器。用量資訊由 Hermes 回報後累計。
             </p>
           </div>
         )}

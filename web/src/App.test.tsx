@@ -4,8 +4,77 @@ import userEvent from "@testing-library/user-event";
 import App from "./App";
 
 const calls: { url: string; body: any }[] = [];
+it("refreshes the local search index after a completed turn", async () => {
+  signedIn = true;
+  render(<App />);
+  await screen.findByRole("button", { name: "啟用桌面通知" });
+  await waitFor(() => expect(Events.instances.length).toBeGreaterThan(0));
+  Events.instances
+    .at(-1)!
+    .emit("frame", {
+      method: "event",
+      params: { type: "message.complete", session_id: "completed-1" },
+    });
+  await waitFor(() =>
+    expect(
+      calls.some(
+        (c) =>
+          c.body.method === "session.history" &&
+          c.body.params.session_id === "completed-1",
+      ),
+    ).toBe(true),
+  );
+});
 let signedIn = false;
+it("archives stored sessions and confirms permanent deletion", async () => {
+  signedIn = true;
+  vi.spyOn(window, "confirm").mockReturnValue(true);
+  const user = userEvent.setup();
+  render(<App />);
+  await user.click(
+    await screen.findByRole("button", { name: "歸檔 既有對話" }),
+  );
+  await waitFor(() =>
+    expect(
+      calls.some(
+        (c) =>
+          c.body.method === "session.archive" &&
+          c.body.params.session_id === "stored-1" &&
+          c.body.params.archived === true,
+      ),
+    ).toBe(true),
+  );
+  await user.click(screen.getByRole("button", { name: "刪除 既有對話" }));
+  await waitFor(() =>
+    expect(
+      calls.some(
+        (c) =>
+          c.body.method === "session.delete" &&
+          c.body.params.session_id === "stored-1",
+      ),
+    ).toBe(true),
+  );
+});
 let installPolls = 0;
+it("branches at the selected visible message", async () => {
+  signedIn = true;
+  const user = userEvent.setup();
+  render(<App />);
+  await user.click(await screen.findByRole("button", { name: "既有對話" }));
+  await user.click(
+    await screen.findByRole("button", { name: "從第 1 則訊息分支" }),
+  );
+  await waitFor(() =>
+    expect(
+      calls.some(
+        (c) =>
+          c.body.method === "session.branch" &&
+          c.body.params.count === 1 &&
+          c.body.params.session_id === "resumed-1",
+      ),
+    ).toBe(true),
+  );
+});
 class Events {
   static instances: Events[] = [];
   listeners: Record<string, (e: { data: string }) => void> = {};
@@ -137,16 +206,14 @@ it("rejects wrong login, then creates and sends a prompt and displays streamed r
       ),
     ).toBe(true),
   );
-  Events.instances
-    .at(-1)!
-    .emit("frame", {
-      method: "event",
-      params: {
-        type: "message.delta",
-        session_id: "live-1",
-        payload: { text: "串流回覆" },
-      },
-    });
+  Events.instances.at(-1)!.emit("frame", {
+    method: "event",
+    params: {
+      type: "message.delta",
+      session_id: "live-1",
+      payload: { text: "串流回覆" },
+    },
+  });
   expect(await screen.findByText("串流回覆")).toBeInTheDocument();
 });
 it("resumes stored sessions and saves connection settings", async () => {
@@ -284,7 +351,8 @@ it("installs Hermes from the settings page and fills connection settings", async
     expect(
       calls.some(
         (c) =>
-          c.url === "/api/install/start" && c.body.targetDir === "/opt/hermes-new",
+          c.url === "/api/install/start" &&
+          c.body.targetDir === "/opt/hermes-new",
       ),
     ).toBe(true),
   );
@@ -302,15 +370,11 @@ it("installs Hermes from the settings page and fills connection settings", async
 
 it("renames a stored session from the sidebar", async () => {
   signedIn = true;
-  const prompt = vi
-    .spyOn(window, "prompt")
-    .mockReturnValue("新名稱");
+  const prompt = vi.spyOn(window, "prompt").mockReturnValue("新名稱");
   const user = userEvent.setup();
   render(<App />);
   await screen.findByText("既有對話");
-  await user.click(
-    screen.getByRole("button", { name: "重新命名 既有對話" }),
-  );
+  await user.click(screen.getByRole("button", { name: "重新命名 既有對話" }));
   await waitFor(() =>
     expect(
       calls.some(
@@ -329,9 +393,7 @@ it("closes a stored session from the sidebar", async () => {
   const user = userEvent.setup();
   render(<App />);
   await screen.findByText("既有對話");
-  await user.click(
-    screen.getByRole("button", { name: "關閉對話 既有對話" }),
-  );
+  await user.click(screen.getByRole("button", { name: "關閉對話 既有對話" }));
   await waitFor(() =>
     expect(
       calls.some(
@@ -350,9 +412,7 @@ it("compresses and branches the active session", async () => {
   await screen.findByText("既有對話");
   await user.click(screen.getByRole("button", { name: "新增對話" }));
   await waitFor(() =>
-    expect(
-      calls.some((c) => c.body.method === "session.create"),
-    ).toBe(true),
+    expect(calls.some((c) => c.body.method === "session.create")).toBe(true),
   );
   const compress = screen.getByRole("button", { name: "壓縮對話" });
   await waitFor(() => expect(compress).toBeEnabled());
@@ -388,7 +448,5 @@ it("shows the usage dashboard and diagnostics on the logs page", async () => {
   await user.click(screen.getByRole("button", { name: /執行紀錄/ }));
   expect(await screen.findByText("總 tokens")).toBeInTheDocument();
   expect(screen.getByText("215")).toBeInTheDocument();
-  expect(
-    await screen.findByText("fixture stderr line"),
-  ).toBeInTheDocument();
+  expect(await screen.findByText("fixture stderr line")).toBeInTheDocument();
 });
