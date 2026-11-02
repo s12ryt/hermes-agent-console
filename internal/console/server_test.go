@@ -124,7 +124,7 @@ func TestAPIErrorsAndSettings(t *testing.T) {
 	for _, tc := range []struct {
 		path, body string
 		code       int
-	}{{"/api/rpc", `{"method":"shell.exec"}`, 400}, {"/api/rpc", `{"method":"session.list","params":{}}`, 503}, {"/api/respond", `{"id":"missing","result":{}}`, 409}, {"/api/settings", `{`, 400}} {
+	}{{"/api/rpc", `{"method":"shell.exec"}`, 400}, {"/api/rpc", `{"method":"session.list","params":{}}`, 503}, {"/api/rpc", `{"method":"session.close","params":{"session_id":"x"}}`, 503}, {"/api/rpc", `{"method":"session.branch_whole","params":{"session_id":"x"}}`, 503}, {"/api/rpc", `{"method":"session.compress","params":{"session_id":"x"}}`, 503}, {"/api/respond", `{"id":"missing","result":{}}`, 409}, {"/api/settings", `{`, 400}} {
 		method := "POST"
 		if tc.path == "/api/settings" {
 			method = "PUT"

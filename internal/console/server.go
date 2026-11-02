@@ -296,7 +296,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]bool{"ok": true})
 }
 
-var allowedMethods = map[string]bool{"session.create": true, "session.list": true, "session.resume": true, "session.activate": true, "session.history": true, "session.interrupt": true, "session.title": true, "session.usage": true, "session.status": true, "session.active_list": true, "session.events.since": true, "model.options": true, "config.get": true, "config.set": true, "command.dispatch": true, "prompt.submit": true}
+var allowedMethods = map[string]bool{"session.create": true, "session.list": true, "session.resume": true, "session.activate": true, "session.history": true, "session.interrupt": true, "session.title": true, "session.usage": true, "session.status": true, "session.active_list": true, "session.events.since": true, "session.close": true, "session.branch_whole": true, "session.compress": true, "model.options": true, "config.get": true, "config.set": true, "command.dispatch": true, "prompt.submit": true}
 
 func (s *Server) rpc(w http.ResponseWriter, r *http.Request) {
 	var v struct {
