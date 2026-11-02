@@ -27,19 +27,20 @@ type attempt struct {
 const maxEventStreams = 64
 
 type Server struct {
-	store    *Store
-	gateway  *Gateway
-	password [32]byte
-	secure   bool
-	assets   fs.FS
-	mu       sync.Mutex
-	tokens   map[string]time.Time
-	attempts map[string]attempt
-	streams  int
+	store     *Store
+	gateway   *Gateway
+	installer *Installer
+	password  [32]byte
+	secure    bool
+	assets    fs.FS
+	mu        sync.Mutex
+	tokens    map[string]time.Time
+	attempts  map[string]attempt
+	streams   int
 }
 
 func NewServer(store *Store, password string, secure bool, assets fs.FS) *Server {
-	return &Server{store: store, gateway: NewGateway(), password: sha256.Sum256([]byte(password)), secure: secure, assets: assets, tokens: map[string]time.Time{}, attempts: map[string]attempt{}}
+	return &Server{store: store, gateway: NewGateway(), installer: NewInstaller(store), password: sha256.Sum256([]byte(password)), secure: secure, assets: assets, tokens: map[string]time.Time{}, attempts: map[string]attempt{}}
 }
 func (s *Server) Close() { s.gateway.Stop() }
 func (s *Server) AutoStart(ctx context.Context) error {
@@ -196,6 +197,19 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, 200, v)
+	case "GET /api/install/status":
+		writeJSON(w, 200, s.installer.Status())
+	case "POST /api/install/start":
+		var opt InstallOptions
+		if !decode(w, r, &opt) {
+			return
+		}
+		if err := s.installer.Start(opt); err != nil {
+			fail(w, 400, err)
+			return
+		}
+		s.store.AddLog("install", "開始安裝 Hermes 到 "+opt.TargetDir)
+		writeJSON(w, 200, map[string]bool{"ok": true})
 	case "POST /api/rpc":
 		s.rpc(w, r)
 	case "POST /api/respond":

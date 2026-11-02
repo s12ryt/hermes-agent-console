@@ -256,3 +256,73 @@ func TestCSPWithoutUnsafeInline(t *testing.T) {
 		t.Fatalf("CSP still allows unsafe-inline: %s", csp)
 	}
 }
+
+func TestInstallAPI(t *testing.T) {
+	app := testServer(t)
+	// 未登入：兩個端點都必須拒絕
+	if w := request(app, "GET", "/api/install/status", "", nil, ""); w.Code != 401 {
+		t.Fatalf("status unauthenticated: %d", w.Code)
+	}
+	if w := request(app, "POST", "/api/install/start", `{}`, nil, ""); w.Code != 401 {
+		t.Fatalf("start unauthenticated: %d", w.Code)
+	}
+
+	cookie := login(t, app)
+	// 初始狀態
+	w := request(app, "GET", "/api/install/status", "", cookie, "")
+	if w.Code != 200 {
+		t.Fatalf("status: %d %s", w.Code, w.Body)
+	}
+	var st InstallStatus
+	if err := json.Unmarshal(w.Body.Bytes(), &st); err != nil {
+		t.Fatal(err)
+	}
+	if st.Running || st.Done {
+		t.Fatalf("初始安裝狀態應為 idle，got %+v", st)
+	}
+	// 無效參數
+	if w := request(app, "POST", "/api/install/start", `{"python":"x","targetDir":"relative"}`, cookie, ""); w.Code != 400 {
+		t.Fatalf("relative dir: %d", w.Code)
+	}
+	if w := request(app, "POST", "/api/install/start", `{"python":"","targetDir":"/abs"}`, cookie, ""); w.Code != 400 {
+		t.Fatalf("empty python: %d", w.Code)
+	}
+
+	// 啟動一次會快速失敗的安裝（下載來源指向 404），驗證狀態收斂為 done + error
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	app.installer.base = srv.URL
+	dir := t.TempDir()
+	body := `{"python":"python","targetDir":` + quote(filepath.Join(dir, "hermes")) + `}`
+	if w := request(app, "POST", "/api/install/start", body, cookie, ""); w.Code != 200 {
+		t.Fatalf("start: %d %s", w.Code, w.Body)
+	}
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		w = request(app, "GET", "/api/install/status", "", cookie, "")
+		if err := json.Unmarshal(w.Body.Bytes(), &st); err != nil {
+			t.Fatal(err)
+		}
+		if !st.Running {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if st.Running {
+		t.Fatal("安裝未在期限內結束")
+	}
+	if st.Error == "" || !strings.Contains(st.Error, "下載") {
+		t.Fatalf("應回報下載錯誤，got %q", st.Error)
+	}
+	// 安裝結束後其他 API 不受影響
+	if w := request(app, "GET", "/api/status", "", cookie, ""); w.Code != 200 {
+		t.Fatal(w.Code)
+	}
+}
+
+func quote(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}
