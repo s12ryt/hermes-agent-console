@@ -15,9 +15,14 @@ export function notifyFrame(frame: Frame) {
         : frame.method === "clarify"
           ? "Hermes 等待回答"
           : "";
-  if (title)
+  if (!title) return;
+  try {
     new Notification(title, {
       body: "請返回面板查看。",
       tag: "hermes-" + kind,
     });
+  } catch {
+    // Some browsers require service-worker notifications despite reporting permission.
+    // Desktop hints are optional; the incoming chat frame must still be processed.
+  }
 }

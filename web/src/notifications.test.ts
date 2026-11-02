@@ -1,5 +1,14 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { notifyFrame } from "./notifications";
+it("keeps event processing alive when the browser rejects a notification", () => {
+  const notification = vi.fn(function () {
+    throw new Error("unsupported constructor");
+  });
+  Object.assign(notification, { permission: "granted" });
+  vi.stubGlobal("Notification", notification);
+  vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+  expect(() => notifyFrame({ method: "approval" })).not.toThrow();
+});
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
