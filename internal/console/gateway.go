@@ -59,8 +59,8 @@ func (b *tailBuffer) Write(p []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.text += string(p)
-	if len(b.text) > 4096 {
-		b.text = b.text[len(b.text)-4096:]
+	if len(b.text) > 65536 {
+		b.text = b.text[len(b.text)-65536:]
 	}
 	return len(p), nil
 }
@@ -93,6 +93,17 @@ func (g *Gateway) setStatusLocked(v Status) {
 	g.publishLocked(map[string]any{"method": "console.status", "params": v})
 }
 func (g *Gateway) Status() Status { g.mu.Lock(); defer g.mu.Unlock(); return g.status }
+
+// Diag 回傳 Hermes 子程序的診斷資訊（stderr 尾端），僅供已登入的管理介面使用。
+func (g *Gateway) Diag() map[string]string {
+	g.mu.Lock()
+	p := g.p
+	g.mu.Unlock()
+	if p == nil {
+		return map[string]string{"stderr": ""}
+	}
+	return map[string]string{"stderr": strings.TrimSpace(p.stderr.String())}
+}
 func (g *Gateway) Start(ctx context.Context, v Settings) error {
 	if v.Source == "" || v.Python == "" {
 		return errors.New("請先設定 Hermes Python 與原始碼目錄")

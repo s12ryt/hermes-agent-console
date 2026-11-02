@@ -39,3 +39,25 @@ func TestSettingsRejectRelativePaths(t *testing.T) {
 		t.Fatal("accepted relative source")
 	}
 }
+
+func TestUsagePersistence(t *testing.T) {
+	s, err := OpenStore(filepath.Join(t.TempDir(), "usage.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err = s.RecordUsage(Usage{SessionID: "a", Calls: 2, Input: 120.5, Output: 80, Total: 200.5}); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.RecordUsage(Usage{SessionID: "b", Calls: 1, Input: 10, Output: 5, Total: 15}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := s.UsageRows()
+	if err != nil || len(rows) != 2 || rows[0].SessionID != "b" {
+		t.Fatalf("rows %+v err %v", rows, err)
+	}
+	tot, err := s.UsageTotals()
+	if err != nil || tot.Calls != 3 || tot.Input != 130.5 || tot.Output != 85 || tot.Total != 215.5 {
+		t.Fatalf("totals %+v err %v", tot, err)
+	}
+}

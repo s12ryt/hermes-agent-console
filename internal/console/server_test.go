@@ -152,6 +152,50 @@ func TestPromptAPIDeliversToHermes(t *testing.T) {
 	}
 }
 
+func TestDiagEndpoint(t *testing.T) {
+	app := testServer(t)
+	app.gateway = fixtureGateway(t)
+	if w := request(app, "GET", "/api/diag", "", nil, ""); w.Code != 401 {
+		t.Fatalf("unauthenticated diag: %d", w.Code)
+	}
+	cookie := login(t, app)
+	w := request(app, "GET", "/api/diag", "", cookie, "")
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "stderr") {
+		t.Fatalf("diag %d %s", w.Code, w.Body)
+	}
+}
+
+func TestUsageCollectorAndAPI(t *testing.T) {
+	app := testServer(t)
+	app.gateway = fixtureGateway(t)
+	app.restartCollector()
+	cookie := login(t, app)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if _, err := app.gateway.Call(ctx, "usage.ping", map[string]any{}); err != nil {
+		t.Fatal(err)
+	}
+	var body string
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		w := request(app, "GET", "/api/usage", "", cookie, "")
+		body = w.Body.String()
+		if w.Code == 200 && strings.Contains(body, "live-1") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("usage not collected: %d %s", w.Code, body)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !strings.Contains(body, `"total":200`) {
+		t.Fatalf("usage payload missing totals: %s", body)
+	}
+	if w := request(app, "GET", "/api/usage", "", nil, ""); w.Code != 401 {
+		t.Fatalf("unauthenticated usage: %d", w.Code)
+	}
+}
+
 func TestJSONBodyRequiresJSONContentType(t *testing.T) {
 	app := testServer(t)
 	// httptest.NewRequest 對 strings.Reader 會自動給 text/x-web-string，模擬非 JSON Content-Type

@@ -27,22 +27,97 @@ type attempt struct {
 const maxEventStreams = 64
 
 type Server struct {
-	store     *Store
-	gateway   *Gateway
-	installer *Installer
-	password  [32]byte
-	secure    bool
-	assets    fs.FS
-	mu        sync.Mutex
-	tokens    map[string]time.Time
-	attempts  map[string]attempt
-	streams   int
+	store         *Store
+	gateway       *Gateway
+	installer     *Installer
+	password      [32]byte
+	secure        bool
+	assets        fs.FS
+	mu            sync.Mutex
+	tokens        map[string]time.Time
+	attempts      map[string]attempt
+	streams       int
+	collectorDone chan struct{}
 }
 
 func NewServer(store *Store, password string, secure bool, assets fs.FS) *Server {
-	return &Server{store: store, gateway: NewGateway(), installer: NewInstaller(store), password: sha256.Sum256([]byte(password)), secure: secure, assets: assets, tokens: map[string]time.Time{}, attempts: map[string]attempt{}}
+	s := &Server{store: store, gateway: NewGateway(), installer: NewInstaller(store), password: sha256.Sum256([]byte(password)), secure: secure, assets: assets, tokens: map[string]time.Time{}, attempts: map[string]attempt{}}
+	s.startCollector()
+	return s
 }
-func (s *Server) Close() { s.gateway.Stop() }
+func (s *Server) Close() {
+	s.stopCollector()
+	s.gateway.Stop()
+}
+
+func (s *Server) startCollector() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.collectorDone != nil {
+		return
+	}
+	s.collectorDone = make(chan struct{})
+	done := s.collectorDone
+	go s.collectUsage(done)
+}
+func (s *Server) stopCollector() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.collectorDone != nil {
+		close(s.collectorDone)
+		s.collectorDone = nil
+	}
+}
+func (s *Server) restartCollector() {
+	s.stopCollector()
+	s.startCollector()
+}
+
+// collectUsage 訂閱 gateway 事件，在每次對話回合完成時向 Hermes 查詢用量並存入 SQLite。
+func (s *Server) collectUsage(done <-chan struct{}) {
+	ch, _, unsub := s.gateway.Subscribe()
+	defer unsub()
+	for {
+		select {
+		case <-done:
+			return
+		case v, open := <-ch:
+			if !open {
+				return
+			}
+			f, ok := v.(Frame)
+			if !ok || f.Method != "event" {
+				continue
+			}
+			var p struct {
+				Type      string `json:"type"`
+				SessionID string `json:"session_id"`
+			}
+			if json.Unmarshal(f.Params, &p) != nil || p.Type != "message.complete" || p.SessionID == "" {
+				continue
+			}
+			go s.fetchUsage(p.SessionID)
+		}
+	}
+}
+func (s *Server) fetchUsage(sid string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	raw, err := s.gateway.Call(ctx, "session.usage", map[string]any{"session_id": sid})
+	if err != nil {
+		return
+	}
+	var u struct {
+		Calls  int64   `json:"calls"`
+		Input  float64 `json:"input"`
+		Output float64 `json:"output"`
+		Total  float64 `json:"total"`
+	}
+	if json.Unmarshal(raw, &u) != nil {
+		return
+	}
+	s.store.RecordUsage(Usage{SessionID: sid, Calls: u.Calls, Input: u.Input, Output: u.Output, Total: u.Total})
+}
 func (s *Server) AutoStart(ctx context.Context) error {
 	v, err := s.store.Settings()
 	if err != nil {
@@ -190,6 +265,20 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.gateway.Stop()
 		s.store.AddLog("gateway", "Hermes 已停止")
 		writeJSON(w, 200, s.gateway.Status())
+	case "GET /api/diag":
+		writeJSON(w, 200, s.gateway.Diag())
+	case "GET /api/usage":
+		rows, err := s.store.UsageRows()
+		if err != nil {
+			fail(w, 500, err)
+			return
+		}
+		tot, err := s.store.UsageTotals()
+		if err != nil {
+			fail(w, 500, err)
+			return
+		}
+		writeJSON(w, 200, map[string]any{"items": rows, "totals": tot})
 	case "GET /api/logs":
 		v, err := s.store.Logs()
 		if err != nil {

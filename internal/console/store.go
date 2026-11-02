@@ -30,7 +30,7 @@ func OpenStore(path string) (*Store, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	_, err = db.Exec(`PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS logs (id INTEGER PRIMARY KEY, time TEXT NOT NULL, kind TEXT NOT NULL, detail TEXT NOT NULL);`)
+	_, err = db.Exec(`PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS logs (id INTEGER PRIMARY KEY, time TEXT NOT NULL, kind TEXT NOT NULL, detail TEXT NOT NULL); CREATE TABLE IF NOT EXISTS usage (id INTEGER PRIMARY KEY, time TEXT NOT NULL, session_id TEXT NOT NULL, calls INTEGER NOT NULL, input REAL NOT NULL, output REAL NOT NULL, total REAL NOT NULL);`)
 	if err != nil {
 		db.Close()
 		return nil, err
@@ -99,4 +99,50 @@ func (s *Store) Logs() ([]Log, error) {
 		out = append(out, v)
 	}
 	return out, rows.Err()
+}
+
+type Usage struct {
+	ID        int64   `json:"id"`
+	Time      string  `json:"time"`
+	SessionID string  `json:"session_id"`
+	Calls     int64   `json:"calls"`
+	Input     float64 `json:"input"`
+	Output    float64 `json:"output"`
+	Total     float64 `json:"total"`
+}
+
+func (s *Store) RecordUsage(u Usage) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec("INSERT INTO usage(time,session_id,calls,input,output,total) VALUES(?,?,?,?,?,?)", time.Now().UTC().Format(time.RFC3339), u.SessionID, u.Calls, u.Input, u.Output, u.Total); err != nil {
+		return err
+	}
+	if _, err = tx.Exec("DELETE FROM usage WHERE id <= (SELECT MAX(id)-5000 FROM usage)"); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+func (s *Store) UsageRows() ([]Usage, error) {
+	rows, err := s.db.Query("SELECT id,time,session_id,calls,input,output,total FROM usage ORDER BY id DESC LIMIT 100")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Usage{}
+	for rows.Next() {
+		var v Usage
+		if err = rows.Scan(&v.ID, &v.Time, &v.SessionID, &v.Calls, &v.Input, &v.Output, &v.Total); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+func (s *Store) UsageTotals() (Usage, error) {
+	var v Usage
+	err := s.db.QueryRow("SELECT COALESCE(SUM(calls),0),COALESCE(SUM(input),0),COALESCE(SUM(output),0),COALESCE(SUM(total),0) FROM usage").Scan(&v.Calls, &v.Input, &v.Output, &v.Total)
+	return v, err
 }

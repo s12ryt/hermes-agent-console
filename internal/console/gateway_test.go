@@ -39,6 +39,10 @@ func TestHermesFixture(t *testing.T) {
 			}
 		case "session.list":
 			result = map[string]any{"sessions": []any{map[string]any{"id": "stored-1", "title": "Fixture"}}}
+		case "usage.ping":
+			emit(map[string]any{"jsonrpc": "2.0", "method": "event", "params": map[string]any{"type": "message.complete", "session_id": "live-1", "payload": map[string]any{"text": "done"}}})
+		case "session.usage":
+			result = map[string]any{"calls": 1, "input": 120, "output": 80, "total": 200}
 		case "prompt.submit":
 			emit(map[string]any{"jsonrpc": "2.0", "method": "event", "params": map[string]any{"type": "message.delta", "session_id": "live-1", "payload": map[string]any{"text": "hello"}}})
 			emit(map[string]any{"jsonrpc": "2.0", "id": "srq-1", "method": "approval", "params": map[string]any{"session_id": "live-1", "command": "ls"}})
