@@ -67,16 +67,24 @@ func (b *tailBuffer) Write(p []byte) (int, error) {
 func (b *tailBuffer) String() string { b.mu.Lock(); defer b.mu.Unlock(); return b.text }
 
 type Gateway struct {
-	operation   sync.Mutex
-	mu          sync.Mutex
-	p           *process
-	status      Status
-	next        uint64
-	subscribers map[chan any]bool
+	operation    sync.Mutex
+	mu           sync.Mutex
+	p            *process
+	status       Status
+	next         uint64
+	subscribers  map[chan any]bool
+	approvalHook func(command string) bool
 }
 
 func NewGateway() *Gateway {
 	return &Gateway{status: Status{State: "stopped"}, subscribers: map[chan any]bool{}}
+}
+
+// SetApprovalHook 註冊白名單判斷函式；符合條件的工具核准會自動以單次允許回應。
+func (g *Gateway) SetApprovalHook(fn func(command string) bool) {
+	g.mu.Lock()
+	g.approvalHook = fn
+	g.mu.Unlock()
 }
 func (g *Gateway) publishLocked(v any) {
 	for ch := range g.subscribers {
@@ -104,7 +112,7 @@ func (g *Gateway) Diag() map[string]string {
 	}
 	return map[string]string{"stderr": strings.TrimSpace(p.stderr.String())}
 }
-func (g *Gateway) Start(ctx context.Context, v Settings) error {
+func (g *Gateway) Start(ctx context.Context, v Settings, extraEnv ...string) error {
 	if v.Source == "" || v.Python == "" {
 		return errors.New("請先設定 Hermes Python 與原始碼目錄")
 	}
@@ -120,6 +128,20 @@ func (g *Gateway) Start(ctx context.Context, v Settings) error {
 	cmd := exec.Command(v.Python, "-u", "-m", "tui_gateway.entry")
 	cmd.Dir = v.Source
 	cmd.Env = os.Environ()
+	for _, entry := range extraEnv {
+		name, _, ok := strings.Cut(entry, "=")
+		if !ok {
+			return errors.New("無效的環境設定")
+		}
+		filtered := cmd.Env[:0]
+		for _, inherited := range cmd.Env {
+			key, _, _ := strings.Cut(inherited, "=")
+			if !strings.EqualFold(key, name) {
+				filtered = append(filtered, inherited)
+			}
+		}
+		cmd.Env = append(filtered, entry)
+	}
 	if v.Home != "" {
 		env := []string{}
 		for _, e := range cmd.Env {
@@ -273,6 +295,40 @@ func (g *Gateway) handle(p *process, f Frame) {
 			g.mu.Unlock()
 			p.write(Frame{ID: f.ID, Error: &RPCError{-32600, "request id must be a string"}})
 			return
+		}
+		if f.Method == "approval" && g.approvalHook != nil {
+			hook := g.approvalHook
+			var ap struct {
+				Command   string `json:"command"`
+				SessionID string `json:"session_id"`
+			}
+			valid := json.Unmarshal(f.Params, &ap) == nil
+			g.mu.Unlock()
+			approved := valid && ap.Command != "" && hook(ap.Command)
+			g.mu.Lock()
+			if g.p != p {
+				g.mu.Unlock()
+				return
+			}
+			if approved {
+				g.mu.Unlock()
+				if err := p.write(Frame{ID: f.ID, Result: json.RawMessage(`{"choice":"once"}`)}); err != nil {
+					g.mu.Lock()
+					if g.p == p {
+						p.open[id] = f
+						g.publishLocked(f)
+					}
+					g.mu.Unlock()
+					return
+				}
+				raw, _ := json.Marshal(map[string]any{"type": "console.autoapproval", "session_id": ap.SessionID, "payload": map[string]any{"command": ap.Command, "request_id": id}})
+				g.mu.Lock()
+				if g.p == p {
+					g.publishLocked(Frame{JSONRPC: "2.0", Method: "event", Params: raw})
+				}
+				g.mu.Unlock()
+				return
+			}
 		}
 		if f.Method == "approval" || f.Method == "clarify" {
 			p.open[id] = f

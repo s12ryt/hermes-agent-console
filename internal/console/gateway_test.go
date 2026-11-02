@@ -59,6 +59,57 @@ func TestHermesFixture(t *testing.T) {
 	}
 	os.Exit(0)
 }
+func TestGatewayAutoApprovalHook(t *testing.T) {
+	g := fixtureGateway(t)
+	g.SetApprovalHook(func(command string) bool { return strings.HasPrefix(command, "ls") })
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	ch, _, unsub := g.Subscribe()
+	defer unsub()
+	if _, err := g.Call(ctx, "prompt.submit", map[string]any{"session_id": "live-1", "text": "hi"}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			t.Fatal("fixture did not echo the auto-approval response")
+		case v, open := <-ch:
+			if !open {
+				t.Fatal("subscriber closed")
+			}
+			f, ok := v.(Frame)
+			if !ok || f.Method != "event" {
+				continue
+			}
+			var ev struct {
+				Type    string          `json:"type"`
+				Payload json.RawMessage `json:"payload"`
+			}
+			if json.Unmarshal(f.Params, &ev) == nil && ev.Type == "fixture.response" && strings.Contains(string(ev.Payload), `"id":"srq-1"`) {
+				goto responded
+			}
+		}
+	}
+responded:
+	_, snapshot, snapUnsub := g.Subscribe()
+	snapUnsub()
+	reqs, _ := snapshot.(map[string]any)["requests"].([]Frame)
+	if len(reqs) != 0 {
+		t.Fatalf("approval must not wait in open requests: %+v", reqs)
+	}
+}
+
+func TestApprovalHookCanReadGatewayStatus(t *testing.T) {
+	g := fixtureGateway(t)
+	g.SetApprovalHook(func(command string) bool { return g.Status().Connected && command == "ls" })
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := g.Call(ctx, "prompt.submit", map[string]any{"text": "hi"}); err != nil {
+		t.Fatalf("approval hook blocked gateway: %v", err)
+	}
+}
+
 func fixtureGateway(t *testing.T) *Gateway {
 	t.Helper()
 	g := NewGateway()
