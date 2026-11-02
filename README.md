@@ -22,6 +22,8 @@ export CONSOLE_PASSWORD
 
 **Hermes 本身與 Python 執行環境仍須安裝在伺服器上。** 請先依 Hermes 官方說明安裝依賴、完成模型供應商登入或 API key 設定，確認該環境可以執行 `python -m tui_gateway.entry`。本專案不內含 Hermes、模型或 API key。
 
+**還沒安裝 Hermes？可以先裝面板，之後在面板內安裝 agent。** 到「連線設定」頁的「還沒有安裝 Hermes？」區塊，填入伺服器上可用的 Python（例如 `python3`）、新的安裝目錄（例如 `/opt/hermes-agent`，必須是空的絕對路徑）與分支（預設 `main`），按「下載並安裝」。面板會從官方儲存庫下載原始碼、建立 `.venv` 虛擬環境、`pip` 安裝依賴並驗證 `tui_gateway` 模組，完成後自動把 venv Python 與原始碼目錄填入連線設定，之後按「啟動／重新連線」即可。安裝日誌即時顯示在頁面；若依賴需要額外系統套件导致失敗，可依日誌在伺服器補齊後換新目錄重試。模型供應商登入與 API key 仍依 Hermes 官方流程設定。
+
 填入以下設定並儲存，再按「啟動／重新連線」：
 
 | 欄位 | 範例 | 用途 |
