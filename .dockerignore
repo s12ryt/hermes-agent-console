@@ -1,0 +1,14 @@
+.git
+.github
+agent
+artifacts
+bin
+data
+.playwright-mcp
+web/node_modules
+web/dist
+*.md
+*.db
+*.db-*
+*.exe
+.env
