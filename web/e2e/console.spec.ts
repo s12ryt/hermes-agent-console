@@ -7,6 +7,61 @@ const password = process.env.E2E_PASSWORD ?? "e2e-test-password-2026";
 const python = process.env.E2E_PYTHON ?? "/usr/bin/python3";
 const fixtureDir = process.env.E2E_FIXTURE_DIR ?? "";
 
+test("security settings, confined files and encrypted backup roundtrip", async ({
+  page,
+}) => {
+  test.skip(!fixtureDir, "E2E_FIXTURE_DIR is required");
+  await page.goto("/");
+  await page.getByLabel("管理密碼").fill(password);
+  await page.getByRole("button", { name: "登入控制台" }).click();
+  await page.getByRole("button", { name: "連線設定" }).click();
+  await page.getByLabel("Python 執行檔").fill(python);
+  await page.getByLabel("Hermes 原始碼目錄").fill(fixtureDir);
+  await page.getByLabel("預設工作目錄").fill(fixtureDir);
+  await page.getByRole("button", { name: /儲存連線設定/ }).click();
+  await expect(page.getByText("連線設定已儲存")).toBeVisible();
+  await page
+    .getByLabel("供應商 API Key", { exact: true })
+    .fill("sk-e2e-placeholder");
+  await page.getByRole("button", { name: "儲存金鑰" }).click();
+  await expect(
+    page.getByRole("button", { name: "刪除 openrouter 金鑰" }),
+  ).toBeVisible();
+  const keyList = await page.request.get("/api/keys");
+  expect(await keyList.text()).not.toContain("sk-e2e-placeholder");
+  await page.getByLabel("完整核准命令").fill("echo e2e");
+  await page.getByRole("button", { name: "新增核准規則" }).click();
+  await expect(
+    page.getByRole("button", { name: "刪除規則 echo e2e" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "瀏覽工作目錄" }).click();
+  await page.getByRole("button", { name: "開啟 tui_gateway" }).click();
+  await page.getByRole("button", { name: "開啟 entry.py" }).click();
+  await expect(page.locator(".file-preview")).toContainText(
+    "Local protocol fixture",
+  );
+  expect((await page.request.get("/api/files?path=../escape")).status()).toBe(
+    400,
+  );
+  const backupResponse = await page.request.get("/api/backup");
+  expect(backupResponse.ok()).toBeTruthy();
+  const backup = await backupResponse.json();
+  expect(JSON.stringify(backup)).not.toContain("sk-e2e-placeholder");
+  expect(backup.encrypted_keys).toHaveLength(1);
+  await page.getByRole("button", { name: "刪除規則 echo e2e" }).click();
+  await expect(
+    page.getByRole("button", { name: "刪除規則 echo e2e" }),
+  ).toHaveCount(0);
+  await page.request.post("/api/stop");
+  expect(
+    (await page.request.post("/api/restore", { data: backup })).ok(),
+  ).toBeTruthy();
+  expect(await (await page.request.get("/api/rules")).json()).toEqual(
+    expect.arrayContaining([expect.objectContaining({ pattern: "echo e2e" })]),
+  );
+  await page.getByRole("button", { name: "刪除 openrouter 金鑰" }).click();
+});
+
 test("login → connect → chat → approve → interrupt → logout", async ({
   page,
 }) => {
@@ -27,7 +82,10 @@ test("login → connect → chat → approve → interrupt → logout", async ({
   await expect(page.getByRole("button", { name: /連線設定/ })).toBeVisible();
 
   // 填入執行環境並儲存
-  await page.getByRole("button", { name: /連線設定/ }).first().click();
+  await page
+    .getByRole("button", { name: /連線設定/ })
+    .first()
+    .click();
   await page.getByLabel("Python 執行檔").fill(python);
   await page.getByLabel("Hermes 原始碼目錄").fill(fixtureDir);
   await page.getByRole("button", { name: /儲存連線設定/ }).click();
