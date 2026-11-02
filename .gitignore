@@ -1,0 +1,10 @@
+node_modules/
+web/dist/
+bin/
+data/
+*.db*
+*.exe
+.env
+agent/
+artifacts/
+.playwright-mcp/
