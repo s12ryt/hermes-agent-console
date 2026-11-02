@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -193,6 +194,114 @@ func TestUsageCollectorAndAPI(t *testing.T) {
 	}
 	if w := request(app, "GET", "/api/usage", "", nil, ""); w.Code != 401 {
 		t.Fatalf("unauthenticated usage: %d", w.Code)
+	}
+}
+
+func TestRulesAPI(t *testing.T) {
+	app := testServer(t)
+	if w := request(app, "GET", "/api/rules", "", nil, ""); w.Code != 401 {
+		t.Fatalf("unauthenticated rules: %d", w.Code)
+	}
+	cookie := login(t, app)
+	if w := request(app, "POST", "/api/rules", `{"pattern":"  "}`, cookie, ""); w.Code != 400 {
+		t.Fatalf("blank pattern: %d %s", w.Code, w.Body)
+	}
+	if w := request(app, "POST", "/api/rules", `{"pattern":"ls"}`, cookie, ""); w.Code != 200 {
+		t.Fatalf("add rule: %d %s", w.Code, w.Body)
+	}
+	w := request(app, "GET", "/api/rules", "", cookie, "")
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "ls") {
+		t.Fatalf("list rules: %d %s", w.Code, w.Body)
+	}
+	var rules []struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &rules); err != nil || len(rules) != 1 {
+		t.Fatalf("decode rules %v", err)
+	}
+	if w = request(app, "POST", "/api/rules/delete", fmt.Sprintf(`{"id":%d}`, rules[0].ID), cookie, ""); w.Code != 200 {
+		t.Fatalf("delete rule: %d %s", w.Code, w.Body)
+	}
+	if w = request(app, "GET", "/api/rules", "", cookie, ""); !strings.Contains(w.Body.String(), "[]") {
+		t.Fatalf("rules not deleted: %s", w.Body)
+	}
+}
+
+func TestAutoApprovalViaRules(t *testing.T) {
+	app := testServer(t)
+	app.gateway = fixtureGateway(t)
+	app.gateway.SetApprovalHook(app.autoApprove)
+	cookie := login(t, app)
+	if w := request(app, "POST", "/api/rules", `{"pattern":"ls"}`, cookie, ""); w.Code != 200 {
+		t.Fatalf("add rule: %d %s", w.Code, w.Body)
+	}
+	w := request(app, "POST", "/api/rpc", `{"method":"prompt.submit","params":{"session_id":"live-1","text":"hi"}}`, cookie, "")
+	if w.Code != 200 {
+		t.Fatalf("prompt: %d %s", w.Code, w.Body)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		logs, err := app.store.Logs()
+		if err == nil {
+			for _, l := range logs {
+				if l.Kind == "auto-approval" {
+					return
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("auto-approval was not recorded")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func TestKeysAPI(t *testing.T) {
+	app := testServer(t)
+	if w := request(app, "GET", "/api/keys", "", nil, ""); w.Code != 401 {
+		t.Fatalf("unauthenticated keys: %d", w.Code)
+	}
+	cookie := login(t, app)
+	if w := request(app, "POST", "/api/keys", `{"name":"bad name","value":"x"}`, cookie, ""); w.Code != 400 {
+		t.Fatalf("invalid name accepted: %d %s", w.Code, w.Body)
+	}
+	if w := request(app, "POST", "/api/keys", `{"name":"openrouter","value":"sk-xyz"}`, cookie, ""); w.Code != 200 {
+		t.Fatalf("save key: %d %s", w.Code, w.Body)
+	}
+	w := request(app, "GET", "/api/keys", "", cookie, "")
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "openrouter") || strings.Contains(w.Body.String(), "sk-xyz") {
+		t.Fatalf("key list leaked or missing: %s", w.Body)
+	}
+	var keys []struct {
+		ID int64 `json:"id"`
+	}
+	if env, err := app.providerEnv(); err != nil || len(env) != 1 || env[0] != "OPENROUTER_API_KEY=sk-xyz" {
+		t.Fatal("provider environment missing configured key")
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &keys); err != nil || len(keys) != 1 {
+		t.Fatalf("decode keys %v", err)
+	}
+	if w = request(app, "POST", "/api/keys/delete", fmt.Sprintf(`{"id":%d}`, keys[0].ID), cookie, ""); w.Code != 200 {
+		t.Fatalf("delete key: %d %s", w.Code, w.Body)
+	}
+	env, err := app.providerEnv()
+	if err != nil || len(env) != 0 {
+		t.Fatal("provider environment should be empty after delete")
+	}
+}
+
+func TestAutoApprovalRejectsPrefixAndShellExpansion(t *testing.T) {
+	app := testServer(t)
+	if err := app.store.AddRule("ls"); err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range []string{"lsof", "ls -la", "ls; whoami", "ls\nwhoami", "ls && whoami", "ls$(whoami)", "ls > output"} {
+		if app.autoApprove(command) {
+			t.Errorf("unsafe approval: %q", command)
+		}
+	}
+	if !app.autoApprove("ls") {
+		t.Fatal("exact command not approved")
 	}
 }
 

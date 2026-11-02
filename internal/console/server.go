@@ -27,21 +27,24 @@ type attempt struct {
 const maxEventStreams = 64
 
 type Server struct {
-	store         *Store
-	gateway       *Gateway
-	installer     *Installer
-	password      [32]byte
-	secure        bool
-	assets        fs.FS
-	mu            sync.Mutex
-	tokens        map[string]time.Time
-	attempts      map[string]attempt
-	streams       int
-	collectorDone chan struct{}
+	store           *Store
+	gateway         *Gateway
+	installer       *Installer
+	password        [32]byte
+	secure          bool
+	assets          fs.FS
+	mu              sync.Mutex
+	tokens          map[string]time.Time
+	attempts        map[string]attempt
+	streams         int
+	collectorDone   chan struct{}
+	collectorExited chan struct{}
 }
 
 func NewServer(store *Store, password string, secure bool, assets fs.FS) *Server {
 	s := &Server{store: store, gateway: NewGateway(), installer: NewInstaller(store), password: sha256.Sum256([]byte(password)), secure: secure, assets: assets, tokens: map[string]time.Time{}, attempts: map[string]attempt{}}
+	s.gateway.SetApprovalHook(s.autoApprove)
+	s.store.SetCipherSeed(s.password)
 	s.startCollector()
 	return s
 }
@@ -57,15 +60,23 @@ func (s *Server) startCollector() {
 		return
 	}
 	s.collectorDone = make(chan struct{})
+	s.collectorExited = make(chan struct{})
 	done := s.collectorDone
-	go s.collectUsage(done)
+	exited := s.collectorExited
+	gateway := s.gateway
+	ch, _, unsub := gateway.Subscribe()
+	go func() { defer close(exited); defer unsub(); s.collectUsage(done, gateway, ch) }()
 }
 func (s *Server) stopCollector() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	exited := s.collectorExited
 	if s.collectorDone != nil {
 		close(s.collectorDone)
 		s.collectorDone = nil
+	}
+	s.mu.Unlock()
+	if exited != nil {
+		<-exited
 	}
 }
 func (s *Server) restartCollector() {
@@ -74,16 +85,17 @@ func (s *Server) restartCollector() {
 }
 
 // collectUsage 訂閱 gateway 事件，在每次對話回合完成時向 Hermes 查詢用量並存入 SQLite。
-func (s *Server) collectUsage(done <-chan struct{}) {
-	ch, _, unsub := s.gateway.Subscribe()
-	defer unsub()
+func (s *Server) collectUsage(done <-chan struct{}, gateway *Gateway, ch <-chan any) {
 	for {
 		select {
 		case <-done:
 			return
 		case v, open := <-ch:
 			if !open {
-				return
+				var unsub func()
+				ch, _, unsub = gateway.Subscribe()
+				defer unsub()
+				continue
 			}
 			f, ok := v.(Frame)
 			if !ok || f.Method != "event" {
@@ -96,14 +108,33 @@ func (s *Server) collectUsage(done <-chan struct{}) {
 			if json.Unmarshal(f.Params, &p) != nil || p.Type != "message.complete" || p.SessionID == "" {
 				continue
 			}
-			go s.fetchUsage(p.SessionID)
+			s.fetchGatewayUsage(gateway, p.SessionID)
 		}
 	}
 }
+
+// autoApprove 僅允許與有效規則完全一致的命令。
+func (s *Server) autoApprove(command string) bool {
+	rules, err := s.store.RuleRows()
+	if err != nil {
+		return false
+	}
+	for _, r := range rules {
+		if command == r.Pattern && validApprovalRule(command) {
+			s.store.AddLog("auto-approval", "白名單自動允許："+command)
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Server) fetchUsage(sid string) {
+	s.fetchGatewayUsage(s.gateway, sid)
+}
+func (s *Server) fetchGatewayUsage(gateway *Gateway, sid string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	raw, err := s.gateway.Call(ctx, "session.usage", map[string]any{"session_id": sid})
+	raw, err := gateway.Call(ctx, "session.usage", map[string]any{"session_id": sid})
 	if err != nil {
 		return
 	}
@@ -126,7 +157,11 @@ func (s *Server) AutoStart(ctx context.Context) error {
 	if v.Source == "" {
 		return nil
 	}
-	return s.gateway.Start(ctx, v)
+	env, err := s.providerEnv()
+	if err != nil {
+		return err
+	}
+	return s.gateway.Start(ctx, v, env...)
 }
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -221,6 +256,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch r.Method + " " + r.URL.Path {
+	case "GET /api/backup":
+		s.downloadBackup(w, r)
+	case "POST /api/restore":
+		s.restore(w, r)
+	case "GET /api/files":
+		s.files(w, r)
 	case "GET /api/me":
 		writeJSON(w, 200, map[string]bool{"authenticated": true})
 	case "POST /api/logout":
@@ -253,7 +294,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "POST /api/restart":
 		v, err := s.store.Settings()
 		if err == nil {
-			err = s.gateway.Start(r.Context(), v)
+			var env []string
+			env, err = s.providerEnv()
+			if err == nil {
+				err = s.gateway.Start(r.Context(), v, env...)
+			}
 		}
 		if err != nil {
 			fail(w, 503, err)
@@ -279,6 +324,80 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, 200, map[string]any{"items": rows, "totals": tot})
+	case "GET /api/keys":
+		rows, err := s.store.APIKeyRows()
+		if err != nil {
+			fail(w, 500, "無法讀取金鑰列表")
+			return
+		}
+		writeJSON(w, 200, rows)
+	case "POST /api/keys":
+		var v struct {
+			Name  string `json:"name"`
+			Value string `json:"value"`
+		}
+		if !decode(w, r, &v) {
+			return
+		}
+		if err := s.store.SaveAPIKey(v.Name, v.Value); err != nil {
+			fail(w, 400, "無法儲存金鑰，請檢查供應商與輸入值")
+			return
+		}
+		writeJSON(w, 200, map[string]bool{"ok": true})
+	case "POST /api/keys/delete":
+		var v struct {
+			ID int64 `json:"id"`
+		}
+		if !decode(w, r, &v) {
+			return
+		}
+		if err := s.store.DeleteAPIKey(v.ID); err != nil {
+			fail(w, 500, "無法刪除金鑰")
+			return
+		}
+		writeJSON(w, 200, map[string]bool{"ok": true})
+	case "GET /api/rules":
+		rows, err := s.store.RuleRows()
+		if err != nil {
+			fail(w, 500, err)
+			return
+		}
+		writeJSON(w, 200, rows)
+	case "POST /api/rules":
+		var v struct {
+			Pattern string `json:"pattern"`
+		}
+		if !decode(w, r, &v) {
+			return
+		}
+		if err := s.store.AddRule(v.Pattern); err != nil {
+			fail(w, 400, err)
+			return
+		}
+		s.store.AddLog("rule", "新增核准白名單規則")
+		writeJSON(w, 200, map[string]bool{"ok": true})
+	case "POST /api/rules/delete":
+		var v struct {
+			ID int64 `json:"id"`
+		}
+		if !decode(w, r, &v) {
+			return
+		}
+		if err := s.store.DeleteRule(v.ID); err != nil {
+			fail(w, 500, err)
+			return
+		}
+		s.store.AddLog("rule", "移除核准白名單規則")
+		writeJSON(w, 200, map[string]bool{"ok": true})
+	case "GET /api/updates":
+		s.updates(w, r)
+	case "GET /api/search":
+		hits, err := s.store.searchConversations(r.URL.Query().Get("q"))
+		if err != nil {
+			fail(w, 500, "無法搜尋對話")
+			return
+		}
+		writeJSON(w, 200, hits)
 	case "GET /api/logs":
 		v, err := s.store.Logs()
 		if err != nil {
@@ -385,7 +504,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]bool{"ok": true})
 }
 
-var allowedMethods = map[string]bool{"session.create": true, "session.list": true, "session.resume": true, "session.activate": true, "session.history": true, "session.interrupt": true, "session.title": true, "session.usage": true, "session.status": true, "session.active_list": true, "session.events.since": true, "session.close": true, "session.branch_whole": true, "session.compress": true, "model.options": true, "config.get": true, "config.set": true, "command.dispatch": true, "prompt.submit": true}
+var allowedMethods = map[string]bool{"session.create": true, "session.list": true, "session.resume": true, "session.activate": true, "session.history": true, "session.interrupt": true, "session.title": true, "session.usage": true, "session.status": true, "session.active_list": true, "session.events.since": true, "session.close": true, "session.archive": true, "session.delete": true, "session.branch": true, "session.branch_whole": true, "session.compress": true, "model.options": true, "config.get": true, "config.set": true, "command.dispatch": true, "prompt.submit": true}
 
 func (s *Server) rpc(w http.ResponseWriter, r *http.Request) {
 	var v struct {
@@ -433,6 +552,36 @@ func (s *Server) rpc(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.store.AddLog("rpc", v.Method)
+	if v.Method == "session.delete" {
+		sid, _ := v.Params["session_id"].(string)
+		s.store.db.Exec("DELETE FROM conversation_search WHERE session_id=?", sid)
+	}
+	if v.Method == "session.history" || v.Method == "session.resume" || v.Method == "session.activate" {
+		var history struct {
+			Messages []struct {
+				Role        string `json:"role"`
+				Content     any    `json:"content"`
+				Text        string `json:"text"`
+				DisplayKind string `json:"display_kind"`
+			} `json:"messages"`
+		}
+		if json.Unmarshal(result, &history) == nil {
+			var text strings.Builder
+			for _, m := range history.Messages {
+				if m.DisplayKind == "hidden" {
+					continue
+				}
+				text.WriteString(m.Role + ": " + m.Text)
+				if m.Content != nil {
+					content, _ := json.Marshal(m.Content)
+					text.Write(content)
+				}
+				text.WriteByte('\n')
+			}
+			sid, _ := v.Params["session_id"].(string)
+			s.store.indexConversation(sid, text.String())
+		}
+	}
 	writeJSON(w, 200, json.RawMessage(result))
 }
 
