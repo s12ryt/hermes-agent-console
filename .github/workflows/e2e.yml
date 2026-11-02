@@ -1,0 +1,114 @@
+name: E2E
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  browser:
+    name: Browser E2E (real binary + real subprocess)
+    runs-on: ubuntu-latest
+    env:
+      CONSOLE_PASSWORD: e2e-test-password-2026
+      E2E_FIXTURE_DIR: ${{ github.workspace }}/scripts/fixture
+      E2E_PYTHON: /usr/bin/python3
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: web
+        run: npm ci
+
+      - name: Install Playwright Chromium
+        working-directory: web
+        run: npx playwright install --with-deps chromium
+
+      - name: Build frontend
+        working-directory: web
+        run: npm run build
+
+      - name: Build console binary
+        run: go build -trimpath -o hermes-console ./cmd/console
+
+      - name: Start console
+        run: |
+          mkdir -p /tmp/hermes-console-data
+          nohup ./hermes-console -addr 127.0.0.1:8080 -data /tmp/hermes-console-data >/tmp/hermes-console.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -sf -o /dev/null http://127.0.0.1:8080; then
+              echo "console is up"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "console did not start"
+          cat /tmp/hermes-console.log
+          exit 1
+
+      - name: Run Playwright E2E
+        working-directory: web
+        run: npx playwright test
+
+      - name: Console log on failure
+        if: failure()
+        run: cat /tmp/hermes-console.log || true
+
+      - name: Upload Playwright results on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-e2e
+          path: web/test-results/
+          retention-days: 7
+
+  docker:
+    name: Docker image E2E (API smoke)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Build image
+        run: docker build -t hermes-console-e2e .
+
+      - name: Run container with fixture mounted
+        run: |
+          docker run -d --name hermes-console-e2e -p 18080:8080 \
+            -e CONSOLE_PASSWORD=e2e-test-password-2026 \
+            -v "${PWD}/scripts/fixture:/fixture:ro" \
+            hermes-console-e2e
+          for i in $(seq 1 30); do
+            if curl -sf -o /dev/null http://127.0.0.1:18080; then
+              echo "container is up"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "container did not start"
+          docker logs hermes-console-e2e
+          exit 1
+
+      - name: API smoke test against container
+        run: node scripts/e2e/api-smoke.mjs --url http://127.0.0.1:18080 --python /usr/local/bin/python --source /fixture
+
+      - name: Container log on failure
+        if: failure()
+        run: docker logs hermes-console-e2e
