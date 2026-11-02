@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -49,6 +50,9 @@ var installRefPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 type Installer struct {
 	store *Store
 	base  string
+
+	// testHook 僅供測試注入，用於模擬 run() 內的非預期崩潰。
+	testHook func()
 
 	mu sync.Mutex
 	st InstallStatus
@@ -170,13 +174,32 @@ func (in *Installer) run(opt InstallOptions) {
 			st.Done = true
 		})
 	}
-	// 1. 下載
+	// 不論正常結束、錯誤或非預期 panic，都必須結束 Running，
+	// 否則安裝器會永久忙碌，之後任何安裝都被拒絕。
+	defer func() {
+		if r := recover(); r != nil {
+			in.fail(fmt.Errorf("內部錯誤: %v", r))
+			in.log(string(debug.Stack()))
+		}
+		finish()
+	}()
+	if in.testHook != nil {
+		in.testHook()
+	}
+	// 1. 下載（先試分支 refs/heads，404 時改試標籤 refs/tags）
 	in.step("下載 Hermes 原始碼（" + opt.Ref + "）")
 	url := in.base + "/refs/heads/" + opt.Ref
 	tmp, err := in.download(ctx, url)
 	if err != nil {
+		tagURL := in.base + "/refs/tags/" + opt.Ref
+		in.log("分支下載失敗（" + err.Error() + "），改嘗試標籤 refs/tags/" + opt.Ref)
+		tmp, err = in.download(ctx, tagURL)
+		if err == nil {
+			url = tagURL
+		}
+	}
+	if err != nil {
 		in.fail(fmt.Errorf("下載失敗: %w", err))
-		finish()
 		return
 	}
 	defer os.Remove(tmp)
@@ -186,7 +209,6 @@ func (in *Installer) run(opt InstallOptions) {
 	in.step("解壓到 " + opt.TargetDir)
 	if err := in.extract(tmp, opt.TargetDir); err != nil {
 		in.fail(err)
-		finish()
 		return
 	}
 
@@ -194,7 +216,6 @@ func (in *Installer) run(opt InstallOptions) {
 	in.step("建立虛擬環境（.venv）")
 	if err := in.runCmd(ctx, opt.Python, "-m", "venv", filepath.Join(opt.TargetDir, ".venv")); err != nil {
 		in.fail(err)
-		finish()
 		return
 	}
 
@@ -203,12 +224,10 @@ func (in *Installer) run(opt InstallOptions) {
 	venvPy := venvPythonPath(opt.TargetDir)
 	if err := in.runCmd(ctx, venvPy, "-m", "pip", "install", "--no-input", "--upgrade", "pip"); err != nil {
 		in.fail(err)
-		finish()
 		return
 	}
 	if err := in.runCmd(ctx, venvPy, "-m", "pip", "install", "--no-input", opt.TargetDir); err != nil {
 		in.fail(err)
-		finish()
 		return
 	}
 
@@ -216,7 +235,6 @@ func (in *Installer) run(opt InstallOptions) {
 	in.step("驗證 tui_gateway 模組")
 	if err := in.runCmd(ctx, venvPy, "-c", "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('tui_gateway') else 1)"); err != nil {
 		in.fail(errors.New("找不到 tui_gateway 模組，請檢查安裝日誌"))
-		finish()
 		return
 	}
 
@@ -225,13 +243,11 @@ func (in *Installer) run(opt InstallOptions) {
 	cur, err := in.store.Settings()
 	if err != nil {
 		in.fail(err)
-		finish()
 		return
 	}
 	cur.Python, cur.Source = venvPy, opt.TargetDir
 	if err := in.store.SaveSettings(cur); err != nil {
 		in.fail(err)
-		finish()
 		return
 	}
 	in.snapshot(func(st *InstallStatus) {
@@ -239,7 +255,6 @@ func (in *Installer) run(opt InstallOptions) {
 	})
 	in.store.AddLog("install", "Hermes 安裝完成: "+opt.TargetDir)
 	in.log("安裝完成。已將 Python 與原始碼目錄填入連線設定。")
-	finish()
 }
 
 func (in *Installer) download(ctx context.Context, url string) (string, error) {
