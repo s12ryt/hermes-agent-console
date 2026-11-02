@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Test and verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Check Go formatting
+        run: |
+          unformatted=$(gofmt -l cmd internal web/embed.go)
+          if [ -n "$unformatted" ]; then
+            echo "Files not gofmt-formatted:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Install frontend dependencies
+        working-directory: web
+        run: npm ci
+
+      - name: Frontend tests
+        working-directory: web
+        run: npm test
+
+      - name: Frontend typecheck and build
+        working-directory: web
+        run: npm run build
+
+      - name: Go tests
+        run: go test ./... -count=1 -cover
+
+      - name: Go vet
+        run: go vet ./...
+
+      - name: Go vulnerability scan
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+      - name: npm audit (production dependencies)
+        working-directory: web
+        run: npm audit --omit=dev
