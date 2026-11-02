@@ -85,6 +85,14 @@ beforeEach(() => {
             messages: [{ role: "assistant", text: "歷史訊息" }],
           };
         if (body.method === "session.history") data = { messages: [] };
+        if (body.method === "session.title") data = { ok: true };
+        if (body.method === "session.close")
+          data = { closed: true, messages: [] };
+        if (body.method === "session.compress") data = { ok: true };
+        if (body.method === "session.branch_whole")
+          data = { session_id: "branch-1", messages: [] };
+        if (body.method === "session.activate")
+          data = { session_id: "branch-1", messages: [] };
       }
       return { ok: status < 400, status, json: async () => data };
     }),
@@ -276,3 +284,83 @@ it("installs Hermes from the settings page and fills connection settings", async
     { timeout: 5000 },
   );
 }, 20000);
+
+it("renames a stored session from the sidebar", async () => {
+  signedIn = true;
+  const prompt = vi
+    .spyOn(window, "prompt")
+    .mockReturnValue("新名稱");
+  const user = userEvent.setup();
+  render(<App />);
+  await screen.findByText("既有對話");
+  await user.click(
+    screen.getByRole("button", { name: "重新命名 既有對話" }),
+  );
+  await waitFor(() =>
+    expect(
+      calls.some(
+        (c) =>
+          c.body.method === "session.title" &&
+          c.body.params.session_id === "stored-1" &&
+          c.body.params.title === "新名稱",
+      ),
+    ).toBe(true),
+  );
+  prompt.mockRestore();
+});
+
+it("closes a stored session from the sidebar", async () => {
+  signedIn = true;
+  const user = userEvent.setup();
+  render(<App />);
+  await screen.findByText("既有對話");
+  await user.click(
+    screen.getByRole("button", { name: "關閉對話 既有對話" }),
+  );
+  await waitFor(() =>
+    expect(
+      calls.some(
+        (c) =>
+          c.body.method === "session.close" &&
+          c.body.params.session_id === "stored-1",
+      ),
+    ).toBe(true),
+  );
+});
+
+it("compresses and branches the active session", async () => {
+  signedIn = true;
+  const user = userEvent.setup();
+  render(<App />);
+  await screen.findByText("既有對話");
+  await user.click(screen.getByRole("button", { name: "新增對話" }));
+  await waitFor(() =>
+    expect(
+      calls.some((c) => c.body.method === "session.create"),
+    ).toBe(true),
+  );
+  const compress = screen.getByRole("button", { name: "壓縮對話" });
+  await waitFor(() => expect(compress).toBeEnabled());
+  await user.click(compress);
+  await waitFor(() =>
+    expect(
+      calls.some(
+        (c) =>
+          c.body.method === "session.compress" &&
+          c.body.params.session_id === "live-1",
+      ),
+    ).toBe(true),
+  );
+  const branch = screen.getByRole("button", { name: "建立分支" });
+  await waitFor(() => expect(branch).toBeEnabled());
+  await user.click(branch);
+  await waitFor(() =>
+    expect(
+      calls.some(
+        (c) =>
+          c.body.method === "session.branch_whole" &&
+          ["live-1", "resumed-1"].includes(c.body.params.session_id),
+      ),
+    ).toBe(true),
+  );
+});

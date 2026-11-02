@@ -1505,3 +1505,29 @@ svg {
   white-space: pre-wrap;
   word-break: break-all;
 }
+
+.session-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.session-row .session-item {
+  flex: 1;
+  min-width: 0;
+}
+
+.item-actions {
+  display: none;
+  gap: 2px;
+}
+
+.session-row:hover .item-actions,
+.session-row:focus-within .item-actions {
+  display: inline-flex;
+}
+
+.item-actions button {
+  padding: 4px;
+  font-size: 12px;
+}

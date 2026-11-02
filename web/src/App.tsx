@@ -16,10 +16,13 @@ import {
   Circle,
   Command,
   Folder,
+  GitBranch,
   Hexagon,
   LogOut,
   Menu,
+  Merge,
   MessageSquare,
+  Pencil,
   Plus,
   Power,
   RefreshCw,
@@ -551,21 +554,61 @@ export default function App() {
               (s.title ?? s.id).toLowerCase().includes(search.toLowerCase()),
             )
             .map((s) => (
-              <button
+              <div
                 key={s.id}
-                className={`session-item ${chat.session === s.id ? "selected" : ""}`}
-                onClick={() =>
-                  run(async () => {
-                    await hydrate("session.resume", s.id);
-                    setPage("chat");
-                    setMobile(false);
-                  })
-                }
-                disabled={busy}
+                className={`session-row ${chat.session === s.id ? "selected" : ""}`}
               >
-                <MessageSquare size={14} />
-                <span>{s.title || "未命名對話"}</span>
-              </button>
+                <button
+                  className={`session-item ${chat.session === s.id ? "selected" : ""}`}
+                  onClick={() =>
+                    run(async () => {
+                      await hydrate("session.resume", s.id);
+                      setPage("chat");
+                      setMobile(false);
+                    })
+                  }
+                  disabled={busy}
+                >
+                  <MessageSquare size={14} />
+                  <span>{s.title || "未命名對話"}</span>
+                </button>
+                <span className="item-actions">
+                  <button
+                    aria-label={`重新命名 ${s.title ?? s.id}`}
+                    title="重新命名"
+                    disabled={busy || !status.connected}
+                    onClick={() => {
+                      const t = window.prompt("重新命名對話", s.title ?? "");
+                      if (!t) return;
+                      run(async () => {
+                        await rpc("session.title", {
+                          session_id: s.id,
+                          title: t,
+                        });
+                        setNotice("對話已重新命名");
+                        await refreshSessions();
+                      });
+                    }}
+                  >
+                    <Pencil size={13} />
+                  </button>
+                  <button
+                    aria-label={`關閉對話 ${s.title ?? s.id}`}
+                    title="關閉對話"
+                    disabled={busy || !status.connected}
+                    onClick={() =>
+                      run(async () => {
+                        await rpc("session.close", { session_id: s.id });
+                        if (chat.session === s.id) setChat(initialChat(""));
+                        setNotice("對話已關閉");
+                        await refreshSessions();
+                      })
+                    }
+                  >
+                    <X size={13} />
+                  </button>
+                </span>
+              </div>
             ))}
           {!sessions.length && (
             <p className="sidebar-empty">
@@ -660,19 +703,56 @@ export default function App() {
                   {model || "預設模型"}
                   <ChevronDown size={13} />
                 </button>
-                {chat.session && (
-                  <button
-                    aria-label="重新讀取目前對話"
-                    disabled={busy}
-                    onClick={() =>
-                      run(async () => {
-                        await hydrate("session.activate", chat.session);
-                      })
-                    }
-                  >
-                    <RefreshCw size={14} />
-                  </button>
-                )}
+            {chat.session && (
+              <>
+                <button
+                  aria-label="重新讀取目前對話"
+                  disabled={busy}
+                  onClick={() =>
+                    run(async () => {
+                      await hydrate("session.activate", chat.session);
+                    })
+                  }
+                >
+                  <RefreshCw size={14} />
+                </button>
+                <button
+                  aria-label="壓縮對話"
+                  title="壓縮對話（摘要化長對話）"
+                  disabled={busy}
+                  onClick={() =>
+                    run(async () => {
+                      await rpc("session.compress", {
+                        session_id: chat.session,
+                      });
+                      setNotice("已送出壓縮請求，完成後重新讀取");
+                      await refreshSessions();
+                      await hydrate("session.resume", chat.session);
+                    })
+                  }
+                >
+                  <Merge size={14} />
+                </button>
+                <button
+                  aria-label="建立分支"
+                  title="以此對話建立分支"
+                  disabled={busy}
+                  onClick={() =>
+                    run(async () => {
+                      const data = await rpc("session.branch_whole", {
+                        session_id: chat.session,
+                      });
+                      setNotice("已建立分支");
+                      await refreshSessions();
+                      const sid = data?.session_id;
+                      if (sid) await hydrate("session.activate", String(sid));
+                    })
+                  }
+                >
+                  <GitBranch size={14} />
+                </button>
+              </>
+            )}
               </div>
             </div>
             {modelOpen && (
