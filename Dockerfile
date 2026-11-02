@@ -1,5 +1,5 @@
-# 前端建置階段：產出 web/dist 供 go:embed 使用
-FROM node:22-alpine AS web
+# 前端建置階段：永遠在原生建置平台執行（dist 無架構差異），避免 QEMU 模擬拖慢
+FROM --platform=$BUILDPLATFORM node:22-alpine AS web
 WORKDIR /src/web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci
