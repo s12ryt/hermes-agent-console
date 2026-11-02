@@ -5,6 +5,7 @@ import App from "./App";
 
 const calls: { url: string; body: any }[] = [];
 let signedIn = false;
+let installPolls = 0;
 class Events {
   static instances: Events[] = [];
   listeners: Record<string, (e: { data: string }) => void> = {};
@@ -21,6 +22,7 @@ class Events {
 }
 beforeEach(() => {
   signedIn = false;
+  installPolls = 0;
   calls.length = 0;
   Events.instances = [];
   vi.stubGlobal("EventSource", Events);
@@ -49,7 +51,26 @@ beforeEach(() => {
           home: "",
         };
       else if (url === "/api/logs") data = [];
-      else if (url === "/api/rpc") {
+      else if (url === "/api/install/start") data = { ok: true };
+      else if (url === "/api/install/status") {
+        installPolls++;
+        data =
+          installPolls === 1
+            ? {
+                running: true,
+                done: false,
+                steps: ["下載 Hermes 原始碼（main）"],
+                log: ["下載中…"],
+              }
+            : {
+                running: false,
+                done: true,
+                steps: ["下載 Hermes 原始碼（main）", "驗證 tui_gateway 模組"],
+                log: [],
+                python: "/opt/hermes-new/.venv/bin/python",
+                source: "/opt/hermes-new",
+              };
+      } else if (url === "/api/rpc") {
         if (body.method === "session.list")
           data = { sessions: [{ id: "stored-1", title: "既有對話" }] };
         if (body.method === "session.create")
@@ -225,3 +246,33 @@ it("restores the stop control for a running resumed session", async () => {
     await screen.findByRole("button", { name: "中止執行" }),
   ).toBeInTheDocument();
 });
+
+it("installs Hermes from the settings page and fills connection settings", async () => {
+  const user = userEvent.setup();
+  render(<App />);
+  await user.type(await screen.findByLabelText("管理密碼"), "correct");
+  await user.click(screen.getByRole("button", { name: "登入控制台" }));
+  await screen.findByText("既有對話");
+  await user.click(screen.getByRole("button", { name: "連線設定" }));
+  await user.type(screen.getByLabelText("基底 Python"), "python3");
+  await user.type(screen.getByLabelText("安裝目錄"), "/opt/hermes-new");
+  await user.click(screen.getByRole("button", { name: "下載並安裝" }));
+  await waitFor(() =>
+    expect(
+      calls.some(
+        (c) =>
+          c.url === "/api/install/start" && c.body.targetDir === "/opt/hermes-new",
+      ),
+    ).toBe(true),
+  );
+  expect(
+    await screen.findByText("下載 Hermes 原始碼（main）"),
+  ).toBeInTheDocument();
+  await waitFor(
+    () =>
+      expect(screen.getByLabelText("Python 執行檔")).toHaveValue(
+        "/opt/hermes-new/.venv/bin/python",
+      ),
+    { timeout: 5000 },
+  );
+}, 20000);

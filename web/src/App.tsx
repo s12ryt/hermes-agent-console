@@ -7,6 +7,7 @@ import {
 } from "react";
 import Markdown from "react-markdown";
 import {
+  ArrowDown,
   ArrowUp,
   ArrowUpRight,
   Activity,
@@ -51,6 +52,15 @@ type Session = {
   started_at?: number;
 };
 type Entry = { id: number; time: string; kind: string; detail: string };
+type InstallStatus = {
+  running: boolean;
+  done: boolean;
+  error?: string;
+  steps: string[];
+  log: string[];
+  python?: string;
+  source?: string;
+};
 class APIError extends Error {
   constructor(
     message: string,
@@ -129,6 +139,8 @@ export default function App() {
     [modelOpen, setModelOpen] = useState(false);
   const [configKey, setConfigKey] = useState("prompt"),
     [configValue, setConfigValue] = useState("");
+  const [install, setInstall] = useState({ python: "", dir: "", ref: "main" }),
+    [installSt, setInstallSt] = useState<InstallStatus | null>(null);
   const latest = useRef(chat),
     statusRef = useRef(status),
     end = useRef<HTMLDivElement>(null),
@@ -137,6 +149,43 @@ export default function App() {
     buffer = useRef<Frame[]>([]);
   latest.current = chat;
   statusRef.current = status;
+  const startInstall = () =>
+    run(async () => {
+      await api("/install/start", "POST", {
+        python: install.python,
+        targetDir: install.dir,
+        ref: install.ref,
+      });
+      setInstallSt({ running: true, done: false, steps: [], log: [] });
+    });
+  // 安裝進行中輪詢狀態；完成且成功時自動把 venv Python 與原始碼目錄填入連線設定。
+  useEffect(() => {
+    if (!installSt?.running) return;
+    const timer = setTimeout(async () => {
+      try {
+        setInstallSt(await api<InstallStatus>("/install/status"));
+      } catch (e) {
+        setInstallSt({
+          running: false,
+          done: true,
+          error: e instanceof Error ? e.message : "無法取得安裝進度",
+          steps: [],
+          log: [],
+        });
+      }
+    }, 700);
+    return () => clearTimeout(timer);
+  }, [installSt]);
+  useEffect(() => {
+    if (installSt?.done && !installSt.error && (installSt.python || installSt.source)) {
+      setSettings((s) => ({
+        ...s,
+        python: installSt.python || s.python,
+        source: installSt.source || s.source,
+      }));
+      setNotice("Hermes 安裝完成，已填入連線設定");
+    }
+  }, [installSt]);
   const report = useCallback((e: unknown) => {
     if (e instanceof APIError && e.status === 401) {
       setAuth(false);
@@ -929,6 +978,7 @@ export default function App() {
                     Python 執行檔
                     <input
                       value={settings.python}
+                      aria-label="Python 執行檔"
                       onChange={(e) =>
                         setSettings({ ...settings, python: e.target.value })
                       }
@@ -941,6 +991,7 @@ export default function App() {
                     Hermes 原始碼目錄
                     <input
                       value={settings.source}
+                      aria-label="Hermes 原始碼目錄"
                       onChange={(e) =>
                         setSettings({ ...settings, source: e.target.value })
                       }
@@ -952,6 +1003,7 @@ export default function App() {
                     預設工作目錄
                     <input
                       value={settings.workspace}
+                      aria-label="預設工作目錄"
                       onChange={(e) =>
                         setSettings({ ...settings, workspace: e.target.value })
                       }
@@ -963,6 +1015,7 @@ export default function App() {
                     Hermes Home（選填）
                     <input
                       value={settings.home}
+                      aria-label="Hermes Home"
                       onChange={(e) =>
                         setSettings({ ...settings, home: e.target.value })
                       }
@@ -1031,6 +1084,88 @@ export default function App() {
                 <small>重新連線會中止目前執行中的工作。</small>
               </aside>
             </div>
+            <section className="panel install-panel">
+              <div className="panel-heading">
+                <div className="panel-symbol">
+                  <ArrowDown size={19} />
+                </div>
+                <div>
+                  <h2>還沒有安裝 Hermes？</h2>
+                  <p>從官方儲存庫下載原始碼、建立虛擛環境並安裝依賴。</p>
+                </div>
+                <span className="tag">ONE CLICK</span>
+              </div>
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  startInstall();
+                }}
+              >
+                <label>
+                  基底 Python
+                  <input
+                    value={install.python}
+                    aria-label="基底 Python"
+                    onChange={(e) =>
+                      setInstall({ ...install, python: e.target.value })
+                    }
+                    placeholder="python3（用來建立虛擬環境的直譯器）"
+                    required
+                  />
+                  <small>伺服器上已安裝、可上網的 Python 直譯器。</small>
+                </label>
+                <label>
+                  安裝目錄
+                  <input
+                    value={install.dir}
+                    aria-label="安裝目錄"
+                    onChange={(e) =>
+                      setInstall({ ...install, dir: e.target.value })
+                    }
+                    placeholder="/opt/hermes-agent"
+                    required
+                  />
+                  <small>必須是新的或空的絕對路徑目錄。</small>
+                </label>
+                <label>
+                  分支或標籤
+                  <input
+                    value={install.ref}
+                    onChange={(e) =>
+                      setInstall({ ...install, ref: e.target.value })
+                    }
+                    placeholder="main"
+                  />
+                  <small>預設 main；模型供應商登入與 API key 仍依 Hermes 官方流程設定。</small>
+                </label>
+                <div className="panel-footer">
+                  <span>下載 → venv → pip → 驗證 tui_gateway</span>
+                  <button className="primary" disabled={busy || installSt?.running}>
+                    <ArrowDown size={15} />
+                    {installSt?.running ? "安裝中…" : "下載並安裝"}
+                  </button>
+                </div>
+              </form>
+              {installSt && (installSt.running || installSt.done) && (
+                <div className="install-progress">
+                  {installSt.steps.length > 0 && (
+                    <ol className="install-steps">
+                      {installSt.steps.map((s) => (
+                        <li key={s}>{s}</li>
+                      ))}
+                    </ol>
+                  )}
+                  {installSt.error && (
+                    <div className="error" role="alert">
+                      {installSt.error}
+                    </div>
+                  )}
+                  {installSt.log.length > 0 && (
+                    <pre className="install-log">{installSt.log.join("\n")}</pre>
+                  )}
+                </div>
+              )}
+            </section>
             <section className="panel hermes-preferences">
               <div className="panel-heading">
                 <div className="panel-symbol">
