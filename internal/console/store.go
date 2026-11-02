@@ -7,6 +7,7 @@ import (
 	_ "modernc.org/sqlite"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -16,7 +17,11 @@ type Settings struct {
 	Workspace string `json:"workspace"`
 	Home      string `json:"home"`
 }
-type Store struct{ db *sql.DB }
+type Store struct {
+	db         *sql.DB
+	cipherMu   sync.RWMutex
+	cipherSeed *[32]byte
+}
 type Log struct {
 	ID     int64  `json:"id"`
 	Time   string `json:"time"`
@@ -30,12 +35,26 @@ func OpenStore(path string) (*Store, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	_, err = db.Exec(`PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS logs (id INTEGER PRIMARY KEY, time TEXT NOT NULL, kind TEXT NOT NULL, detail TEXT NOT NULL); CREATE TABLE IF NOT EXISTS usage (id INTEGER PRIMARY KEY, time TEXT NOT NULL, session_id TEXT NOT NULL, calls INTEGER NOT NULL, input REAL NOT NULL, output REAL NOT NULL, total REAL NOT NULL);`)
+	_, err = db.Exec(`PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY CHECK(id=1), value TEXT NOT NULL); CREATE TABLE IF NOT EXISTS logs (id INTEGER PRIMARY KEY, time TEXT NOT NULL, kind TEXT NOT NULL, detail TEXT NOT NULL); CREATE TABLE IF NOT EXISTS usage (id INTEGER PRIMARY KEY, time TEXT NOT NULL, session_id TEXT NOT NULL, calls INTEGER NOT NULL, input REAL NOT NULL, output REAL NOT NULL, total REAL NOT NULL); CREATE TABLE IF NOT EXISTS approval_rules (id INTEGER PRIMARY KEY, pattern TEXT NOT NULL, created TEXT NOT NULL);`)
 	if err != nil {
 		db.Close()
 		return nil, err
 	}
-	return &Store{db}, nil
+	if _, err = db.Exec(`CREATE TABLE IF NOT EXISTS api_keys (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, salt BLOB NOT NULL, nonce BLOB NOT NULL, ciphertext BLOB NOT NULL, created TEXT NOT NULL)`); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if _, err = db.Exec(`CREATE VIRTUAL TABLE IF NOT EXISTS conversation_search USING fts5(session_id UNINDEXED,text,tokenize='trigram')`); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if _, err = db.Exec(`CREATE TABLE IF NOT EXISTS usage_totals (session_id TEXT PRIMARY KEY, calls INTEGER NOT NULL, input REAL NOT NULL, output REAL NOT NULL, total REAL NOT NULL);
+	INSERT INTO usage_totals SELECT session_id,MAX(calls),MAX(input),MAX(output),MAX(total) FROM usage GROUP BY session_id
+	ON CONFLICT(session_id) DO UPDATE SET calls=MAX(calls,excluded.calls),input=MAX(input,excluded.input),output=MAX(output,excluded.output),total=MAX(total,excluded.total);`); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return &Store{db: db}, nil
 }
 func (s *Store) Close() error { return s.db.Close() }
 func (s *Store) Settings() (Settings, error) {
@@ -52,6 +71,17 @@ func (s *Store) Settings() (Settings, error) {
 	return v, err
 }
 func (s *Store) SaveSettings(v Settings) error {
+	if err := validateSettings(v); err != nil {
+		return err
+	}
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec("INSERT INTO settings(id,value) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value", string(raw))
+	return err
+}
+func validateSettings(v Settings) error {
 	if strings.TrimSpace(v.Python) == "" || strings.ContainsAny(v.Python, "\r\n\x00") {
 		return fmt.Errorf("Python 執行檔不可空白")
 	}
@@ -63,12 +93,7 @@ func (s *Store) SaveSettings(v Settings) error {
 	if v.Source == "" {
 		return fmt.Errorf("請填寫 Hermes 原始碼目錄")
 	}
-	raw, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-	_, err = s.db.Exec("INSERT INTO settings(id,value) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET value=excluded.value", string(raw))
-	return err
+	return nil
 }
 func (s *Store) AddLog(kind, detail string) error {
 	tx, err := s.db.Begin()
@@ -120,6 +145,9 @@ func (s *Store) RecordUsage(u Usage) error {
 	if _, err = tx.Exec("INSERT INTO usage(time,session_id,calls,input,output,total) VALUES(?,?,?,?,?,?)", time.Now().UTC().Format(time.RFC3339), u.SessionID, u.Calls, u.Input, u.Output, u.Total); err != nil {
 		return err
 	}
+	if _, err = tx.Exec(`INSERT INTO usage_totals(session_id,calls,input,output,total) VALUES(?,?,?,?,?) ON CONFLICT(session_id) DO UPDATE SET calls=MAX(calls,excluded.calls),input=MAX(input,excluded.input),output=MAX(output,excluded.output),total=MAX(total,excluded.total)`, u.SessionID, u.Calls, u.Input, u.Output, u.Total); err != nil {
+		return err
+	}
 	if _, err = tx.Exec("DELETE FROM usage WHERE id <= (SELECT MAX(id)-5000 FROM usage)"); err != nil {
 		return err
 	}
@@ -143,6 +171,44 @@ func (s *Store) UsageRows() ([]Usage, error) {
 }
 func (s *Store) UsageTotals() (Usage, error) {
 	var v Usage
-	err := s.db.QueryRow("SELECT COALESCE(SUM(calls),0),COALESCE(SUM(input),0),COALESCE(SUM(output),0),COALESCE(SUM(total),0) FROM usage").Scan(&v.Calls, &v.Input, &v.Output, &v.Total)
+	err := s.db.QueryRow("SELECT COALESCE(SUM(calls),0),COALESCE(SUM(input),0),COALESCE(SUM(output),0),COALESCE(SUM(total),0) FROM usage_totals").Scan(&v.Calls, &v.Input, &v.Output, &v.Total)
 	return v, err
+}
+
+type Rule struct {
+	ID      int64  `json:"id"`
+	Pattern string `json:"pattern"`
+	Created string `json:"created"`
+}
+
+func validApprovalRule(pattern string) bool {
+	return strings.TrimSpace(pattern) != "" && len(pattern) <= 256 && !strings.ContainsAny(pattern, ";|&$`<>\r\n\x00")
+}
+func (s *Store) AddRule(pattern string) error {
+	pattern = strings.TrimSpace(pattern)
+	if !validApprovalRule(pattern) {
+		return fmt.Errorf("完整命令不可空白、超過 256 字元或包含 shell 運算子")
+	}
+	_, err := s.db.Exec("INSERT INTO approval_rules(pattern,created) VALUES(?,?)", pattern, time.Now().UTC().Format(time.RFC3339))
+	return err
+}
+func (s *Store) RuleRows() ([]Rule, error) {
+	rows, err := s.db.Query("SELECT id,pattern,created FROM approval_rules ORDER BY id")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Rule{}
+	for rows.Next() {
+		var v Rule
+		if err = rows.Scan(&v.ID, &v.Pattern, &v.Created); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+func (s *Store) DeleteRule(id int64) error {
+	_, err := s.db.Exec("DELETE FROM approval_rules WHERE id=?", id)
+	return err
 }
